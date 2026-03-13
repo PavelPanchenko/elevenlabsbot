@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
+from bot.access import AdminOnlyMiddleware
 from bot.config import load_settings
 from bot.elevenlabs_client import ElevenLabsClient
 from bot.handlers import AppContext, build_router
@@ -17,6 +18,9 @@ async def run() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dispatcher = Dispatcher()
+    admin_only_middleware = AdminOnlyMiddleware(settings.telegram_admin_id)
+    dispatcher.message.middleware(admin_only_middleware)
+    dispatcher.callback_query.middleware(admin_only_middleware)
 
     store = VoiceStore(settings.voices_file_path)
     await store.initialize()
