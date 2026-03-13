@@ -69,9 +69,7 @@ class ElevenLabsClient:
             "xi-api-key": self._api_key,
             "Accept": "application/json",
         }
-
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-            response = await client.get(url, headers=headers)
+        response = await self._get_with_retries(url, headers=headers)
 
         if response.status_code >= 400:
             details = response.text[:500]
@@ -79,7 +77,11 @@ class ElevenLabsClient:
                 f"Не удалось получить список голосов ({response.status_code}): {details}"
             )
 
-        payload = response.json()
+        payload = self._safe_json_or_raise(
+            response,
+            error_cls=ElevenLabsVoiceFetchError,
+            context="Некорректный ответ списка голосов",
+        )
         voices = payload.get("voices", [])
         if not isinstance(voices, list):
             return []
@@ -132,14 +134,13 @@ class ElevenLabsClient:
         if not files:
             raise ElevenLabsError("Нужно передать минимум один audio sample.")
 
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-            response = await client.post(url, headers=headers, data=data, files=files)
+        response = await self._post_with_retries(url, headers=headers, data=data, files=files)
 
         if response.status_code >= 400:
             details = response.text[:500]
             raise ElevenLabsError(f"Не удалось создать голос ({response.status_code}): {details}")
 
-        payload = response.json()
+        payload = self._safe_json_or_raise(response, error_cls=ElevenLabsError, context="Create voice")
         voice_id = str(payload.get("voice_id", "")).strip()
         resolved_name = str(payload.get("name", "")).strip() or name
         if not voice_id:
@@ -197,7 +198,7 @@ class ElevenLabsClient:
             details = response.text[:500]
             raise ElevenLabsError(f"STT ошибка ({response.status_code}): {details}")
 
-        payload = response.json()
+        payload = self._safe_json_or_raise(response, error_cls=ElevenLabsError, context="STT")
         text = str(payload.get("text", "")).strip()
         if not text:
             raise ElevenLabsError("Распознавание вернуло пустой текст.")
@@ -230,6 +231,44 @@ class ElevenLabsClient:
         if last_error is not None:
             raise ElevenLabsError(f"Сетевая ошибка ElevenLabs: {last_error}") from last_error
         raise ElevenLabsError("Не удалось выполнить запрос к ElevenLabs.")
+
+    async def _get_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                    response = await client.get(url, **kwargs)
+            except (httpx.TimeoutException, httpx.TransportError) as error:
+                last_error = error
+                if attempt < self._max_retries - 1:
+                    await asyncio.sleep(1.2 * (attempt + 1))
+                    continue
+                raise ElevenLabsVoiceFetchError(f"Сетевая ошибка ElevenLabs: {error}") from error
+
+            if response.status_code >= 500:
+                if attempt < self._max_retries - 1:
+                    await asyncio.sleep(1.2 * (attempt + 1))
+                    continue
+                raise ElevenLabsVoiceFetchError(
+                    "ElevenLabs временно недоступен (5xx). Попробуй /syncvoices через 10-20 секунд."
+                )
+
+            return response
+
+        if last_error is not None:
+            raise ElevenLabsVoiceFetchError(f"Сетевая ошибка ElevenLabs: {last_error}") from last_error
+        raise ElevenLabsVoiceFetchError("Не удалось получить список голосов.")
+
+    @staticmethod
+    def _safe_json_or_raise(response: httpx.Response, *, error_cls: type[Exception], context: str) -> Any:
+        try:
+            return response.json()
+        except ValueError as error:
+            body_preview = response.text[:300]
+            raise error_cls(
+                f"{context}: ElevenLabs вернул не-JSON ответ (status {response.status_code}). "
+                f"Body: {body_preview}"
+            ) from error
 
 
 def _build_voice_settings(mode: str) -> dict[str, float | bool]:
