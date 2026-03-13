@@ -1,0 +1,26 @@
+.env
+
+# Python virtual environment
+.venv/
+
+# Runtime data
+data/
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Logs and local temp files
+*.log
+*.tmp
+*.temp
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db

@@ -1,0 +1,12 @@
+services:
+  voicebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voicebot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["uv", "run", "python", "main.py"]
