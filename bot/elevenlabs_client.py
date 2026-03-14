@@ -69,7 +69,12 @@ class ElevenLabsClient:
             "xi-api-key": self._api_key,
             "Accept": "application/json",
         }
-        response = await self._get_with_retries(url, headers=headers)
+        response = await self._get_with_retries(
+            url,
+            headers=headers,
+            error_cls=ElevenLabsVoiceFetchError,
+            unavailable_message="ElevenLabs временно недоступен (5xx). Попробуй /syncvoices через 10-20 секунд.",
+        )
 
         if response.status_code >= 400:
             details = response.text[:500]
@@ -204,6 +209,46 @@ class ElevenLabsClient:
             raise ElevenLabsError("Распознавание вернуло пустой текст.")
         return text
 
+    async def get_tokens_info(self) -> dict[str, Any]:
+        url = "https://api.elevenlabs.io/v1/user/subscription"
+        headers = {
+            "xi-api-key": self._api_key,
+            "Accept": "application/json",
+        }
+        response = await self._get_with_retries(
+            url,
+            headers=headers,
+            error_cls=ElevenLabsError,
+            unavailable_message="ElevenLabs временно недоступен. Попробуй позже.",
+        )
+        if response.status_code >= 400:
+            details = response.text[:500]
+            raise ElevenLabsError(f"Не удалось получить баланс ({response.status_code}): {details}")
+
+        payload = self._safe_json_or_raise(response, error_cls=ElevenLabsError, context="Subscription")
+
+        character_limit = _to_int(payload.get("character_limit"))
+        character_count = _to_int(payload.get("character_count"))
+        remaining_tokens = _to_int(payload.get("remaining_tokens"))
+        remaining_credits = _to_int(payload.get("remaining_credits"))
+
+        calculated_remaining = None
+        if character_limit is not None and character_count is not None:
+            calculated_remaining = max(character_limit - character_count, 0)
+
+        tokens_left = remaining_tokens
+        if tokens_left is None:
+            tokens_left = remaining_credits
+        if tokens_left is None:
+            tokens_left = calculated_remaining
+
+        return {
+            "tier": str(payload.get("tier", "unknown")),
+            "tokens_left": tokens_left,
+            "character_count": character_count,
+            "character_limit": character_limit,
+        }
+
     async def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
@@ -232,7 +277,14 @@ class ElevenLabsClient:
             raise ElevenLabsError(f"Сетевая ошибка ElevenLabs: {last_error}") from last_error
         raise ElevenLabsError("Не удалось выполнить запрос к ElevenLabs.")
 
-    async def _get_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
+    async def _get_with_retries(
+        self,
+        url: str,
+        *,
+        error_cls: type[Exception] = ElevenLabsError,
+        unavailable_message: str = "ElevenLabs временно недоступен (5xx). Попробуй позже.",
+        **kwargs: Any,
+    ) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
@@ -243,21 +295,19 @@ class ElevenLabsClient:
                 if attempt < self._max_retries - 1:
                     await asyncio.sleep(1.2 * (attempt + 1))
                     continue
-                raise ElevenLabsVoiceFetchError(f"Сетевая ошибка ElevenLabs: {error}") from error
+                raise error_cls(f"Сетевая ошибка ElevenLabs: {error}") from error
 
             if response.status_code >= 500:
                 if attempt < self._max_retries - 1:
                     await asyncio.sleep(1.2 * (attempt + 1))
                     continue
-                raise ElevenLabsVoiceFetchError(
-                    "ElevenLabs временно недоступен (5xx). Попробуй /syncvoices через 10-20 секунд."
-                )
+                raise error_cls(unavailable_message)
 
             return response
 
         if last_error is not None:
-            raise ElevenLabsVoiceFetchError(f"Сетевая ошибка ElevenLabs: {last_error}") from last_error
-        raise ElevenLabsVoiceFetchError("Не удалось получить список голосов.")
+            raise error_cls(f"Сетевая ошибка ElevenLabs: {last_error}") from last_error
+        raise error_cls("Не удалось выполнить GET-запрос к ElevenLabs.")
 
     @staticmethod
     def _safe_json_or_raise(response: httpx.Response, *, error_cls: type[Exception], context: str) -> Any:
@@ -286,3 +336,12 @@ def _build_voice_settings(mode: str) -> dict[str, float | bool]:
         "style": 0.2,
         "use_speaker_boost": True,
     }
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (ValueError, TypeError):
+        return None

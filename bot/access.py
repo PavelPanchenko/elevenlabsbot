@@ -5,10 +5,12 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
+from .storage import VoiceStore
+
 
 class AdminOnlyMiddleware(BaseMiddleware):
-    def __init__(self, admin_user_id: int) -> None:
-        self._admin_user_id = int(admin_user_id)
+    def __init__(self, store: VoiceStore) -> None:
+        self._store = store
 
     async def __call__(
         self,
@@ -17,11 +19,19 @@ class AdminOnlyMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user_id = _extract_event_user_id(event)
-        if user_id is None or user_id == self._admin_user_id:
+        if user_id is None:
+            return await handler(event, data)
+
+        is_allowed = await self._store.is_user_allowed(user_id)
+        if is_allowed:
             return await handler(event, data)
 
         if isinstance(event, Message):
-            await event.answer("Доступ запрещен. Обратись к администратору бота.")
+            await event.answer(
+                "Доступ запрещен. Передай администратору твой Telegram ID:\n"
+                f"`{user_id}`",
+                parse_mode="Markdown",
+            )
             return None
         if isinstance(event, CallbackQuery):
             await event.answer("Доступ запрещен.", show_alert=True)

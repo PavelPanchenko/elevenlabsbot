@@ -18,12 +18,14 @@ async def run() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dispatcher = Dispatcher()
-    admin_only_middleware = AdminOnlyMiddleware(settings.telegram_admin_id)
-    dispatcher.message.middleware(admin_only_middleware)
-    dispatcher.callback_query.middleware(admin_only_middleware)
 
     store = VoiceStore(settings.voices_file_path)
     await store.initialize()
+    await store.ensure_allowed_users([settings.telegram_admin_id, *settings.telegram_allowed_ids])
+
+    admin_only_middleware = AdminOnlyMiddleware(store)
+    dispatcher.message.middleware(admin_only_middleware)
+    dispatcher.callback_query.middleware(admin_only_middleware)
 
     elevenlabs = ElevenLabsClient(
         api_key=settings.elevenlabs_api_key,
@@ -32,7 +34,11 @@ async def run() -> None:
         output_format=settings.elevenlabs_output_format,
     )
 
-    context = AppContext(store=store, elevenlabs=elevenlabs)
+    context = AppContext(
+        admin_user_id=settings.telegram_admin_id,
+        store=store,
+        elevenlabs=elevenlabs,
+    )
     dispatcher.include_router(build_router(context))
 
     await bot.set_my_commands(
@@ -41,9 +47,17 @@ async def run() -> None:
             BotCommand(command="menu", description="Открыть меню кнопок"),
             BotCommand(command="voices", description="Список и выбор голосов"),
             BotCommand(command="syncvoices", description="Синхронизировать голоса"),
+            BotCommand(command="settings", description="Открыть настройки бота"),
             BotCommand(command="myvoice", description="Показать текущий голос"),
+            BotCommand(command="myid", description="Показать мой Telegram ID"),
+            BotCommand(command="tokens", description="Показать остаток токенов"),
+            BotCommand(command="balance", description="Алиас: остаток токенов"),
             BotCommand(command="mode", description="Режим преобразования natural/strong"),
             BotCommand(command="voicemethod", description="Метод voice: sts или tts"),
+            BotCommand(command="responsemode", description="Формат ответа auto/voice/audio"),
+            BotCommand(command="allow", description="(Admin) Выдать доступ по Telegram ID"),
+            BotCommand(command="deny", description="(Admin) Забрать доступ по Telegram ID"),
+            BotCommand(command="allowed", description="(Admin) Список разрешенных ID"),
             BotCommand(command="addwizard", description="Создать голос из sample-аудио"),
             BotCommand(command="createvoice", description="Алиас: создать голос из sample-аудио"),
             BotCommand(command="addvoice", description="Добавить голос по voice_id"),

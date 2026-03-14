@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 class Settings:
     telegram_bot_token: str
     telegram_admin_id: int
+    telegram_allowed_ids: tuple[int, ...]
     elevenlabs_api_key: str
     elevenlabs_sts_model_id: str
     elevenlabs_tts_model_id: str
@@ -23,6 +24,7 @@ def load_settings() -> Settings:
 
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_admin_id_raw = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
+    telegram_allowed_ids_raw = os.getenv("TELEGRAM_ALLOWED_IDS", "").strip()
     elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
     legacy_model_id = os.getenv("ELEVENLABS_MODEL_ID", "").strip()
     elevenlabs_sts_model_id = os.getenv("ELEVENLABS_STS_MODEL_ID", legacy_model_id).strip()
@@ -46,6 +48,7 @@ def load_settings() -> Settings:
         telegram_admin_id = int(telegram_admin_id_raw)
     except ValueError as error:
         raise ValueError("TELEGRAM_ADMIN_ID должен быть числом") from error
+    telegram_allowed_ids = _parse_telegram_allowed_ids(telegram_allowed_ids_raw)
 
     data_path = Path(data_dir)
     data_path.mkdir(parents=True, exist_ok=True)
@@ -53,9 +56,25 @@ def load_settings() -> Settings:
     return Settings(
         telegram_bot_token=telegram_bot_token,
         telegram_admin_id=telegram_admin_id,
+        telegram_allowed_ids=telegram_allowed_ids,
         elevenlabs_api_key=elevenlabs_api_key,
         elevenlabs_sts_model_id=elevenlabs_sts_model_id,
         elevenlabs_tts_model_id=elevenlabs_tts_model_id,
         elevenlabs_output_format=elevenlabs_output_format,
         voices_file_path=data_path / "voices.json",
     )
+
+
+def _parse_telegram_allowed_ids(raw: str) -> tuple[int, ...]:
+    if not raw:
+        return tuple()
+    result: list[int] = []
+    for part in raw.split(","):
+        value = part.strip()
+        if not value:
+            continue
+        try:
+            result.append(int(value))
+        except ValueError as error:
+            raise ValueError(f"TELEGRAM_ALLOWED_IDS содержит нечисловой ID: {value}") from error
+    return tuple(sorted(set(result)))

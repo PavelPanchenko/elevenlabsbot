@@ -35,6 +35,9 @@ class VoiceStore:
                     "selected_voice_by_user": {},
                     "conversion_mode_by_user": {},
                     "voice_method_by_user": {},
+                    "sync_scope_by_user": {},
+                    "response_mode_by_user": {},
+                    "allowed_user_ids": [],
                 }
             )
 
@@ -192,6 +195,90 @@ class VoiceStore:
                 return "sts"
             return method
 
+    async def set_sync_scope(self, user_telegram_id: int, scope: str) -> bool:
+        normalized = scope.strip().lower()
+        if normalized not in {"cloned", "all"}:
+            return False
+        async with self._lock:
+            data = self._read_data()
+            data["sync_scope_by_user"][str(user_telegram_id)] = normalized
+            self._write_data(data)
+            return True
+
+    async def get_sync_scope(self, user_telegram_id: int) -> str:
+        async with self._lock:
+            data = self._read_data()
+            scope = str(data["sync_scope_by_user"].get(str(user_telegram_id), "cloned")).lower()
+            if scope not in {"cloned", "all"}:
+                return "cloned"
+            return scope
+
+    async def set_response_mode(self, user_telegram_id: int, mode: str) -> bool:
+        normalized = mode.strip().lower()
+        if normalized not in {"auto", "voice", "audio"}:
+            return False
+        async with self._lock:
+            data = self._read_data()
+            data["response_mode_by_user"][str(user_telegram_id)] = normalized
+            self._write_data(data)
+            return True
+
+    async def get_response_mode(self, user_telegram_id: int) -> str:
+        async with self._lock:
+            data = self._read_data()
+            mode = str(data["response_mode_by_user"].get(str(user_telegram_id), "auto")).lower()
+            if mode not in {"auto", "voice", "audio"}:
+                return "auto"
+            return mode
+
+    async def ensure_allowed_users(self, user_ids: list[int]) -> None:
+        normalized = sorted({int(item) for item in user_ids})
+        async with self._lock:
+            data = self._read_data()
+            current = set(_to_int_list(data["allowed_user_ids"]))
+            changed = False
+            for user_id in normalized:
+                if user_id not in current:
+                    current.add(user_id)
+                    changed = True
+            if changed:
+                data["allowed_user_ids"] = sorted(current)
+                self._write_data(data)
+
+    async def list_allowed_users(self) -> list[int]:
+        async with self._lock:
+            data = self._read_data()
+            return sorted(_to_int_list(data["allowed_user_ids"]))
+
+    async def is_user_allowed(self, user_id: int) -> bool:
+        async with self._lock:
+            data = self._read_data()
+            return int(user_id) in set(_to_int_list(data["allowed_user_ids"]))
+
+    async def allow_user(self, user_id: int) -> bool:
+        target = int(user_id)
+        async with self._lock:
+            data = self._read_data()
+            current = set(_to_int_list(data["allowed_user_ids"]))
+            if target in current:
+                return False
+            current.add(target)
+            data["allowed_user_ids"] = sorted(current)
+            self._write_data(data)
+            return True
+
+    async def deny_user(self, user_id: int) -> bool:
+        target = int(user_id)
+        async with self._lock:
+            data = self._read_data()
+            current = set(_to_int_list(data["allowed_user_ids"]))
+            if target not in current:
+                return False
+            current.remove(target)
+            data["allowed_user_ids"] = sorted(current)
+            self._write_data(data)
+            return True
+
     @staticmethod
     def _find_existing_voice(
         voices: list[dict[str, Any]], voice_id: str, owner_telegram_id: int
@@ -219,6 +306,9 @@ class VoiceStore:
                 "selected_voice_by_user": {},
                 "conversion_mode_by_user": {},
                 "voice_method_by_user": {},
+                "sync_scope_by_user": {},
+                "response_mode_by_user": {},
+                "allowed_user_ids": [],
             }
 
         with self._file_path.open("r", encoding="utf-8") as file:
@@ -236,8 +326,26 @@ class VoiceStore:
             parsed["conversion_mode_by_user"] = {}
         if "voice_method_by_user" not in parsed or not isinstance(parsed["voice_method_by_user"], dict):
             parsed["voice_method_by_user"] = {}
+        if "sync_scope_by_user" not in parsed or not isinstance(parsed["sync_scope_by_user"], dict):
+            parsed["sync_scope_by_user"] = {}
+        if "response_mode_by_user" not in parsed or not isinstance(
+            parsed["response_mode_by_user"], dict
+        ):
+            parsed["response_mode_by_user"] = {}
+        if "allowed_user_ids" not in parsed or not isinstance(parsed["allowed_user_ids"], list):
+            parsed["allowed_user_ids"] = []
         return parsed
 
     def _write_data(self, data: dict[str, Any]) -> None:
         with self._file_path.open("w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
+
+
+def _to_int_list(values: list[Any]) -> list[int]:
+    result: list[int] = []
+    for item in values:
+        try:
+            result.append(int(item))
+        except (ValueError, TypeError):
+            continue
+    return result

@@ -19,6 +19,7 @@ from .storage import VoiceEntry, VoiceStore
 
 @dataclass(frozen=True)
 class AppContext:
+    admin_user_id: int
     store: VoiceStore
     elevenlabs: ElevenLabsClient
 
@@ -26,6 +27,7 @@ class AppContext:
 BTN_VOICES = "Голоса"
 BTN_SYNC = "Синхронизировать"
 BTN_MY_VOICE = "Текущий голос"
+BTN_SETTINGS = "Настройки"
 BTN_HELP = "Помощь"
 BTN_ADD_WIZARD = "Создать голос (авто)"
 BTN_CANCEL = "Отмена"
@@ -41,6 +43,11 @@ class AddVoiceWizard(StatesGroup):
     waiting_visibility = State()
 
 
+class AccessWizard(StatesGroup):
+    waiting_allow_id = State()
+    waiting_deny_id = State()
+
+
 def build_router(context: AppContext) -> Router:
     router = Router()
 
@@ -51,7 +58,8 @@ def build_router(context: AppContext) -> Router:
             "1) Нажми 'Синхронизировать' (подтянутся cloned голоса из ElevenLabs)\n"
             "2) Открой 'Голоса' и выбери нужный\n"
             "3) Отправь voice/audio и получишь ответ другим голосом\n\n"
-            "Новый голос проще создать через кнопку 'Создать голос (авто)'."
+            "Новый голос проще создать через кнопку 'Создать голос (авто)'.\n"
+            "Параметры работы меняются через кнопку 'Настройки'."
         )
         await message.answer(text, reply_markup=_main_menu_keyboard())
 
@@ -61,17 +69,25 @@ def build_router(context: AppContext) -> Router:
             "Команды:\n"
             "/voices - доступные голоса и выбор\n"
             "/syncvoices [all] - подтянуть голоса из ElevenLabs\n"
+            "/settings - открыть настройки\n"
             "/myvoice - текущий голос\n"
+            "/myid - показать мой Telegram ID\n"
+            "/tokens (/balance) - остаток токенов\n"
             "/mode [natural|strong] - режим силы преобразования\n"
             "/voicemethod [sts|tts] - как обрабатывать голосовые\n"
+            "/responsemode [auto|voice|audio] - формат ответа\n"
             "/addwizard - создать голос из sample-аудио\n"
             "/createvoice - то же самое, алиас\n"
             "/addvoice <name> <voice_id> [public] - добавить/обновить голос\n"
             "/setvoice <name> - выбрать голос по имени\n\n"
+            "/allow <telegram_id> - выдать доступ (только админ)\n"
+            "/deny <telegram_id> - забрать доступ (только админ)\n"
+            "/allowed - список разрешенных ID (только админ)\n\n"
             "/cancel - отменить текущий мастер\n\n"
             "Параметр public необязателен: public|yes|1\n"
             "Режим преобразования по умолчанию: strong.\n"
             "Метод голосовых по умолчанию: sts.\n"
+            "Формат ответа по умолчанию: auto.\n"
             "Обычный текст бот озвучивает выбранным голосом.\n"
             "По умолчанию синхронизируются только твои cloned голоса.\n"
             "Для всех доступных голосов используй: /syncvoices all"
@@ -81,6 +97,156 @@ def build_router(context: AppContext) -> Router:
     @router.message(Command("menu"))
     async def menu_handler(message: Message) -> None:
         await message.answer("Главное меню открыто.", reply_markup=_main_menu_keyboard())
+
+    @router.message(Command("settings"))
+    async def settings_handler(message: Message) -> None:
+        user_id = _extract_user_id(message)
+        await _show_settings(message, user_id=user_id)
+
+    @router.message(Command("myid"))
+    async def my_id_handler(message: Message) -> None:
+        user_id = _extract_user_id(message)
+        if user_id is None:
+            await message.answer("Не удалось определить Telegram ID.")
+            return
+        await message.answer(f"Твой Telegram ID: `{user_id}`", parse_mode="Markdown")
+
+    @router.message(Command("tokens"))
+    @router.message(Command("balance"))
+    async def tokens_handler(message: Message) -> None:
+        line = await _build_tokens_line()
+        await message.answer(line)
+
+    @router.message(Command("allow"))
+    async def allow_handler(message: Message, command: CommandObject) -> None:
+        requester_id = _extract_user_id(message)
+        if not _is_admin(requester_id, context):
+            await message.answer("Команда доступна только администратору.")
+            return
+        target_id = _parse_user_id_arg(command.args)
+        if target_id is None:
+            await message.answer("Формат: /allow <telegram_id>")
+            return
+        changed = await context.store.allow_user(target_id)
+        if changed:
+            await message.answer(f"Доступ выдан пользователю: `{target_id}`", parse_mode="Markdown")
+            return
+        await message.answer(f"Пользователь уже в списке доступа: `{target_id}`", parse_mode="Markdown")
+
+    @router.message(Command("deny"))
+    async def deny_handler(message: Message, command: CommandObject) -> None:
+        requester_id = _extract_user_id(message)
+        if not _is_admin(requester_id, context):
+            await message.answer("Команда доступна только администратору.")
+            return
+        target_id = _parse_user_id_arg(command.args)
+        if target_id is None:
+            await message.answer("Формат: /deny <telegram_id>")
+            return
+        if target_id == context.admin_user_id:
+            await message.answer("Нельзя удалить доступ у админа.")
+            return
+        changed = await context.store.deny_user(target_id)
+        if changed:
+            await message.answer(f"Доступ удален у пользователя: `{target_id}`", parse_mode="Markdown")
+            return
+        await message.answer(f"Пользователь не найден в списке доступа: `{target_id}`", parse_mode="Markdown")
+
+    @router.message(Command("allowed"))
+    async def allowed_handler(message: Message) -> None:
+        requester_id = _extract_user_id(message)
+        if not _is_admin(requester_id, context):
+            await message.answer("Команда доступна только администратору.")
+            return
+        allowed_ids = await context.store.list_allowed_users()
+        if not allowed_ids:
+            await message.answer("Список доступа пуст.")
+            return
+        lines = ["Разрешенные Telegram ID:"]
+        lines.extend(f"- `{user_id}`" for user_id in allowed_ids)
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+
+    @router.callback_query(F.data == "settings:access:list")
+    async def settings_access_list_callback(callback: CallbackQuery) -> None:
+        requester_id = _extract_callback_user_id(callback)
+        if not _is_admin(requester_id, context):
+            await callback.answer("Только для админа.", show_alert=True)
+            return
+        allowed_ids = await context.store.list_allowed_users()
+        if not allowed_ids:
+            await callback.message.answer("Список доступа пуст.")
+        else:
+            lines = ["Разрешенные Telegram ID:"]
+            lines.extend(f"- `{user_id}`" for user_id in allowed_ids)
+            await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+        await callback.answer()
+
+    @router.callback_query(F.data == "settings:access:add")
+    async def settings_access_add_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        requester_id = _extract_callback_user_id(callback)
+        if not _is_admin(requester_id, context):
+            await callback.answer("Только для админа.", show_alert=True)
+            return
+        await state.set_state(AccessWizard.waiting_allow_id)
+        await callback.message.answer(
+            "Введи Telegram ID пользователя для выдачи доступа.\n"
+            "Отмена: /cancel"
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "settings:access:deny")
+    async def settings_access_deny_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        requester_id = _extract_callback_user_id(callback)
+        if not _is_admin(requester_id, context):
+            await callback.answer("Только для админа.", show_alert=True)
+            return
+        await state.set_state(AccessWizard.waiting_deny_id)
+        await callback.message.answer(
+            "Введи Telegram ID пользователя для удаления доступа.\n"
+            "Отмена: /cancel"
+        )
+        await callback.answer()
+
+    @router.message(AccessWizard.waiting_allow_id, F.text)
+    async def access_allow_id_input_handler(message: Message, state: FSMContext) -> None:
+        requester_id = _extract_user_id(message)
+        if not _is_admin(requester_id, context):
+            await state.clear()
+            await message.answer("Команда доступна только администратору.")
+            return
+        target_id = _parse_user_id_arg(message.text)
+        if target_id is None:
+            await message.answer("Неверный ID. Введи числовой Telegram ID или /cancel.")
+            return
+        changed = await context.store.allow_user(target_id)
+        await state.clear()
+        if changed:
+            await message.answer(f"Доступ выдан: `{target_id}`", parse_mode="Markdown")
+        else:
+            await message.answer(f"ID уже был в доступе: `{target_id}`", parse_mode="Markdown")
+        await _show_settings(message, user_id=requester_id)
+
+    @router.message(AccessWizard.waiting_deny_id, F.text)
+    async def access_deny_id_input_handler(message: Message, state: FSMContext) -> None:
+        requester_id = _extract_user_id(message)
+        if not _is_admin(requester_id, context):
+            await state.clear()
+            await message.answer("Команда доступна только администратору.")
+            return
+        target_id = _parse_user_id_arg(message.text)
+        if target_id is None:
+            await message.answer("Неверный ID. Введи числовой Telegram ID или /cancel.")
+            return
+        if target_id == context.admin_user_id:
+            await message.answer("Нельзя удалить доступ у админа.")
+            return
+        changed = await context.store.deny_user(target_id)
+        await state.clear()
+        if changed:
+            await message.answer(f"Доступ удален: `{target_id}`", parse_mode="Markdown")
+        else:
+            await message.answer(f"ID не найден в доступе: `{target_id}`", parse_mode="Markdown")
+        await _show_settings(message, user_id=requester_id)
 
     @router.message(Command("cancel"))
     async def cancel_handler(message: Message, state: FSMContext) -> None:
@@ -236,11 +402,21 @@ def build_router(context: AppContext) -> Router:
 
     @router.message(StateFilter(None), F.text == BTN_SYNC)
     async def sync_button_handler(message: Message) -> None:
-        await sync_voices_impl(message, only_cloned=True)
+        user_id = _extract_user_id(message)
+        if user_id is None:
+            await message.answer("Не удалось определить пользователя.")
+            return
+        sync_scope = await context.store.get_sync_scope(user_id)
+        await sync_voices_impl(message, only_cloned=_is_only_cloned_scope(sync_scope))
 
     @router.message(StateFilter(None), F.text == BTN_MY_VOICE)
     async def my_voice_button_handler(message: Message) -> None:
         await my_voice_handler(message)
+
+    @router.message(StateFilter(None), F.text == BTN_SETTINGS)
+    async def settings_button_handler(message: Message) -> None:
+        user_id = _extract_user_id(message)
+        await _show_settings(message, user_id=user_id)
 
     @router.message(StateFilter(None), F.text == BTN_HELP)
     async def help_button_handler(message: Message) -> None:
@@ -295,7 +471,12 @@ def build_router(context: AppContext) -> Router:
             return
 
         try:
-            await _sync_from_elevenlabs(context, user_id, only_cloned=True)
+            sync_scope = await context.store.get_sync_scope(user_id)
+            await _sync_from_elevenlabs(
+                context,
+                user_id,
+                only_cloned=_is_only_cloned_scope(sync_scope),
+            )
         except ElevenLabsVoiceFetchError:
             pass
 
@@ -319,9 +500,16 @@ def build_router(context: AppContext) -> Router:
 
     @router.message(Command("syncvoices"))
     async def sync_voices_handler(message: Message, command: CommandObject) -> None:
-        only_cloned = True
-        if command.args and command.args.strip().lower() == "all":
-            only_cloned = False
+        user_id = _extract_user_id(message)
+        if user_id is None:
+            await message.answer("Не удалось определить пользователя.")
+            return
+        only_cloned = _is_only_cloned_scope(await context.store.get_sync_scope(user_id))
+        if command.args:
+            arg = command.args.strip().lower()
+            if arg in {"all", "cloned"}:
+                await context.store.set_sync_scope(user_id, arg)
+                only_cloned = _is_only_cloned_scope(arg)
         await sync_voices_impl(message, only_cloned=only_cloned)
 
     async def sync_voices_impl(message: Message, *, only_cloned: bool) -> None:
@@ -404,12 +592,14 @@ def build_router(context: AppContext) -> Router:
 
         mode = await context.store.get_conversion_mode(user_id)
         voice_method = await context.store.get_voice_method(user_id)
+        response_mode = await context.store.get_response_mode(user_id)
         await message.answer(
             "Текущий голос:\n"
             f"- name: {selected.name}\n"
             f"- voice_id: {selected.voice_id}\n"
             f"- mode: {mode}\n"
-            f"- voice_method: {voice_method}"
+            f"- voice_method: {voice_method}\n"
+            f"- response_mode: {response_mode}"
         )
 
     @router.message(Command("mode"))
@@ -457,6 +647,142 @@ def build_router(context: AppContext) -> Router:
             return
         await message.answer(f"Метод обработки голосовых установлен: {requested}")
 
+    @router.message(Command("responsemode"))
+    async def response_mode_handler(message: Message, command: CommandObject) -> None:
+        user_id = _extract_user_id(message)
+        if user_id is None:
+            await message.answer("Не удалось определить пользователя.")
+            return
+
+        if not command.args:
+            current_mode = await context.store.get_response_mode(user_id)
+            await message.answer(
+                f"Текущий формат ответа: {current_mode}\n"
+                "Установить: /responsemode auto | /responsemode voice | /responsemode audio"
+            )
+            return
+
+        requested = command.args.strip().lower()
+        ok = await context.store.set_response_mode(user_id, requested)
+        if not ok:
+            await message.answer(
+                "Неверный формат. Используй: /responsemode auto | /responsemode voice | /responsemode audio"
+            )
+            return
+        await message.answer(f"Формат ответа установлен: {requested}")
+
+    @router.callback_query(F.data == "settings:open")
+    async def settings_open_callback(callback: CallbackQuery) -> None:
+        await _show_settings(callback.message, user_id=_extract_callback_user_id(callback))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("settings:mode:"))
+    async def settings_mode_callback(callback: CallbackQuery) -> None:
+        user_id = _extract_callback_user_id(callback)
+        if user_id is None or callback.data is None:
+            await callback.answer("Не удалось обновить настройку.", show_alert=True)
+            return
+        mode = callback.data.split(":", 2)[2]
+        ok = await context.store.set_conversion_mode(user_id, mode)
+        if not ok:
+            await callback.answer("Неверный режим.", show_alert=True)
+            return
+        await callback.answer(f"Режим: {mode}")
+        await _show_settings(callback.message, user_id=user_id)
+
+    @router.callback_query(F.data.startswith("settings:method:"))
+    async def settings_method_callback(callback: CallbackQuery) -> None:
+        user_id = _extract_callback_user_id(callback)
+        if user_id is None or callback.data is None:
+            await callback.answer("Не удалось обновить настройку.", show_alert=True)
+            return
+        method = callback.data.split(":", 2)[2]
+        ok = await context.store.set_voice_method(user_id, method)
+        if not ok:
+            await callback.answer("Неверный метод.", show_alert=True)
+            return
+        await callback.answer(f"Метод: {method}")
+        await _show_settings(callback.message, user_id=user_id)
+
+    @router.callback_query(F.data.startswith("settings:sync:"))
+    async def settings_sync_callback(callback: CallbackQuery) -> None:
+        user_id = _extract_callback_user_id(callback)
+        if user_id is None or callback.data is None:
+            await callback.answer("Не удалось обновить настройку.", show_alert=True)
+            return
+        scope = callback.data.split(":", 2)[2]
+        ok = await context.store.set_sync_scope(user_id, scope)
+        if not ok:
+            await callback.answer("Неверный режим синхронизации.", show_alert=True)
+            return
+        await callback.answer(f"Sync scope: {scope}")
+        await _show_settings(callback.message, user_id=user_id)
+
+    @router.callback_query(F.data.startswith("settings:response:"))
+    async def settings_response_callback(callback: CallbackQuery) -> None:
+        user_id = _extract_callback_user_id(callback)
+        if user_id is None or callback.data is None:
+            await callback.answer("Не удалось обновить настройку.", show_alert=True)
+            return
+        response_mode = callback.data.split(":", 2)[2]
+        ok = await context.store.set_response_mode(user_id, response_mode)
+        if not ok:
+            await callback.answer("Неверный формат ответа.", show_alert=True)
+            return
+        await callback.answer(f"Формат ответа: {response_mode}")
+        await _show_settings(callback.message, user_id=user_id)
+
+    async def _show_settings(message: Message | None, *, user_id: int | None) -> None:
+        if user_id is None or message is None:
+            return
+        mode = await context.store.get_conversion_mode(user_id)
+        method = await context.store.get_voice_method(user_id)
+        sync_scope = await context.store.get_sync_scope(user_id)
+        response_mode = await context.store.get_response_mode(user_id)
+        allowed_count = len(await context.store.list_allowed_users())
+        tokens_line = await _build_tokens_line()
+        text = (
+            "Настройки бота:\n"
+            f"- Режим преобразования: {mode}\n"
+            f"- Метод голосовых: {method}\n"
+            f"- Синхронизация голосов: {sync_scope}\n\n"
+            f"- Формат ответа: {response_mode}\n\n"
+            f"- Пользователей с доступом: {allowed_count}\n\n"
+            f"- {tokens_line}\n\n"
+            "Выбери параметры кнопками ниже."
+        )
+        await message.answer(
+            text,
+            reply_markup=_build_settings_keyboard(
+                mode,
+                method,
+                sync_scope,
+                response_mode,
+                is_admin=_is_admin(user_id, context),
+            ),
+        )
+
+    async def _build_tokens_line() -> str:
+        try:
+            info = await context.elevenlabs.get_tokens_info()
+        except ElevenLabsError as error:
+            details = str(error)
+            if len(details) > 120:
+                details = details[:117] + "..."
+            return f"Токены: недоступно ({details})"
+
+        tier = info.get("tier", "unknown")
+        tokens_left = info.get("tokens_left")
+        used = info.get("character_count")
+        limit = info.get("character_limit")
+
+        if isinstance(tokens_left, int):
+            return f"Токены: {tokens_left} (tier: {tier})"
+        if isinstance(used, int) and isinstance(limit, int):
+            remaining = max(limit - used, 0)
+            return f"Токены: {remaining} из {limit} (tier: {tier})"
+        return f"Токены: неизвестно (tier: {tier})"
+
     @router.message(F.voice | F.audio)
     async def process_audio_handler(message: Message, bot: Bot) -> None:
         user_id = _extract_user_id(message)
@@ -471,6 +797,7 @@ def build_router(context: AppContext) -> Router:
 
         conversion_mode = await context.store.get_conversion_mode(user_id)
         voice_method = await context.store.get_voice_method(user_id)
+        response_mode = await context.store.get_response_mode(user_id)
         status_message = await message.answer("Обрабатываю аудио...")
         try:
             audio_bytes, filename, mime_type = await _download_message_audio(message, bot)
@@ -517,22 +844,16 @@ def build_router(context: AppContext) -> Router:
             return
 
         try:
-            converted_voice_ogg = await _convert_mp3_to_ogg_opus(converted)
-            voice_output = BufferedInputFile(converted_voice_ogg, filename="converted.ogg")
-            await message.answer_voice(
-                voice=voice_output,
+            await _send_mp3_result(
+                message,
+                status_message=status_message,
+                source_mp3=converted,
                 caption=f"Голос: {selected.name} | mode: {conversion_mode} | method: {voice_method}",
+                audio_title=f"Converted with {selected.name}",
+                response_mode=response_mode,
             )
-            await status_message.edit_text("Готово (отправлено как голосовое).")
-        except Exception:
-            output = BufferedInputFile(converted, filename="converted.mp3")
-            await message.answer_audio(
-                audio=output,
-                title=f"Converted with {selected.name}",
-                performer="VoiceBot",
-                caption=f"Голос: {selected.name} | mode: {conversion_mode} | method: {voice_method}",
-            )
-            await status_message.edit_text("Готово (fallback: audio).")
+        except Exception as error:
+            await status_message.edit_text(f"Не удалось отправить результат: {error}")
 
     @router.message(StateFilter(None), F.text)
     async def process_text_handler(message: Message) -> None:
@@ -545,6 +866,7 @@ def build_router(context: AppContext) -> Router:
             BTN_VOICES,
             BTN_SYNC,
             BTN_MY_VOICE,
+            BTN_SETTINGS,
             BTN_HELP,
             BTN_ADD_WIZARD,
             BTN_CANCEL,
@@ -565,6 +887,7 @@ def build_router(context: AppContext) -> Router:
             return
 
         conversion_mode = await context.store.get_conversion_mode(user_id)
+        response_mode = await context.store.get_response_mode(user_id)
         status_message = await message.answer("Озвучиваю текст...")
         synthesized = b""
         try:
@@ -573,24 +896,18 @@ def build_router(context: AppContext) -> Router:
                 target_voice_id=selected.voice_id,
                 conversion_mode=conversion_mode,
             )
-            converted_voice_ogg = await _convert_mp3_to_ogg_opus(synthesized)
-            voice_output = BufferedInputFile(converted_voice_ogg, filename="tts.ogg")
-            await message.answer_voice(
-                voice=voice_output,
+            await _send_mp3_result(
+                message,
+                status_message=status_message,
+                source_mp3=synthesized,
                 caption=f"Голос: {selected.name} | mode: {conversion_mode}",
+                audio_title=f"TTS with {selected.name}",
+                response_mode=response_mode,
             )
-            await status_message.edit_text("Готово (текст озвучен).")
         except ElevenLabsError as error:
             await status_message.edit_text(f"Ошибка ElevenLabs: {error}")
-        except Exception:
-            output = BufferedInputFile(synthesized, filename="tts.mp3")
-            await message.answer_audio(
-                audio=output,
-                title=f"TTS with {selected.name}",
-                performer="VoiceBot",
-                caption=f"Голос: {selected.name} | mode: {conversion_mode}",
-            )
-            await status_message.edit_text("Готово (fallback: audio).")
+        except Exception as error:
+            await status_message.edit_text(f"Ошибка обработки текста: {error}")
 
     return router
 
@@ -615,16 +932,92 @@ def _extract_callback_user_id(callback: CallbackQuery) -> int | None:
     return int(callback.from_user.id)
 
 
+def _is_admin(user_id: int | None, context: AppContext) -> bool:
+    return user_id is not None and int(user_id) == int(context.admin_user_id)
+
+
+def _parse_user_id_arg(raw_args: str | None) -> int | None:
+    if not raw_args:
+        return None
+    value = raw_args.strip().split()[0]
+    if value.startswith("@"):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_VOICES), KeyboardButton(text=BTN_SYNC)],
-            [KeyboardButton(text=BTN_MY_VOICE), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_MY_VOICE), KeyboardButton(text=BTN_SETTINGS)],
+            [KeyboardButton(text=BTN_HELP)],
             [KeyboardButton(text=BTN_ADD_WIZARD)],
         ],
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def _build_settings_keyboard(
+    mode: str,
+    method: str,
+    sync_scope: str,
+    response_mode: str,
+    *,
+    is_admin: bool,
+):
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"{'✅' if mode == 'natural' else '▫️'} Mode natural",
+        callback_data="settings:mode:natural",
+    )
+    builder.button(
+        text=f"{'✅' if mode == 'strong' else '▫️'} Mode strong",
+        callback_data="settings:mode:strong",
+    )
+    builder.button(
+        text=f"{'✅' if method == 'sts' else '▫️'} Voice method STS",
+        callback_data="settings:method:sts",
+    )
+    builder.button(
+        text=f"{'✅' if method == 'tts' else '▫️'} Voice method TTS",
+        callback_data="settings:method:tts",
+    )
+    builder.button(
+        text=f"{'✅' if sync_scope == 'cloned' else '▫️'} Sync cloned",
+        callback_data="settings:sync:cloned",
+    )
+    builder.button(
+        text=f"{'✅' if sync_scope == 'all' else '▫️'} Sync all",
+        callback_data="settings:sync:all",
+    )
+    builder.button(
+        text=f"{'✅' if response_mode == 'auto' else '▫️'} Response auto",
+        callback_data="settings:response:auto",
+    )
+    builder.button(
+        text=f"{'✅' if response_mode == 'voice' else '▫️'} Response voice",
+        callback_data="settings:response:voice",
+    )
+    builder.button(
+        text=f"{'✅' if response_mode == 'audio' else '▫️'} Response audio",
+        callback_data="settings:response:audio",
+    )
+    if is_admin:
+        builder.button(text="Доступ: список", callback_data="settings:access:list")
+        builder.button(text="Доступ: добавить", callback_data="settings:access:add")
+        builder.button(text="Доступ: удалить", callback_data="settings:access:deny")
+        builder.adjust(2, 2, 2, 2, 1, 2, 1)
+    else:
+        builder.adjust(2, 2, 2, 2, 1)
+    return builder.as_markup()
+
+
+def _is_only_cloned_scope(scope: str) -> bool:
+    return scope.strip().lower() != "all"
 
 
 def _wizard_cancel_keyboard() -> ReplyKeyboardMarkup:
@@ -731,6 +1124,49 @@ async def _convert_mp3_to_ogg_opus(source_mp3: bytes) -> bytes:
             raise RuntimeError(f"ffmpeg conversion failed: {details}")
 
         return out_path.read_bytes()
+
+
+async def _send_mp3_result(
+    message: Message,
+    *,
+    status_message: Message,
+    source_mp3: bytes,
+    caption: str,
+    audio_title: str,
+    response_mode: str,
+) -> None:
+    if response_mode == "audio":
+        output = BufferedInputFile(source_mp3, filename="result.mp3")
+        await message.answer_audio(
+            audio=output,
+            title=audio_title,
+            performer="VoiceBot",
+            caption=caption,
+        )
+        await status_message.edit_text("Готово (режим audio).")
+        return
+
+    if response_mode == "voice":
+        converted_voice_ogg = await _convert_mp3_to_ogg_opus(source_mp3)
+        voice_output = BufferedInputFile(converted_voice_ogg, filename="result.ogg")
+        await message.answer_voice(voice=voice_output, caption=caption)
+        await status_message.edit_text("Готово (режим voice).")
+        return
+
+    try:
+        converted_voice_ogg = await _convert_mp3_to_ogg_opus(source_mp3)
+        voice_output = BufferedInputFile(converted_voice_ogg, filename="result.ogg")
+        await message.answer_voice(voice=voice_output, caption=caption)
+        await status_message.edit_text("Готово (авто: голосовое).")
+    except Exception:
+        output = BufferedInputFile(source_mp3, filename="result.mp3")
+        await message.answer_audio(
+            audio=output,
+            title=audio_title,
+            performer="VoiceBot",
+            caption=caption,
+        )
+        await status_message.edit_text("Готово (авто: fallback audio).")
 
 
 async def _sync_from_elevenlabs(context: AppContext, user_id: int, *, only_cloned: bool) -> int:
