@@ -767,6 +767,9 @@ def build_router(context: AppContext) -> Router:
             info = await context.elevenlabs.get_tokens_info()
         except ElevenLabsError as error:
             details = str(error)
+            lowered = details.lower()
+            if "missing_permissions" in lowered:
+                return "Токены: нет прав у API ключа (нужен scope на subscription/balance)."
             if len(details) > 120:
                 details = details[:117] + "..."
             return f"Токены: недоступно ({details})"
@@ -1170,14 +1173,17 @@ async def _send_mp3_result(
 
 
 async def _sync_from_elevenlabs(context: AppContext, user_id: int, *, only_cloned: bool) -> int:
-    remote_voices = await context.elevenlabs.list_available_voices()
+    remote_all = await context.elevenlabs.list_available_voices()
+    remote_voices = remote_all
     if only_cloned:
         remote_voices = [
             voice
-            for voice in remote_voices
+            for voice in remote_all
             if str(voice.get("category", "")).lower() == "cloned" and not voice.get("is_shared", False)
         ]
+    all_provider_ids = [str(item.get("voice_id", "")).strip() for item in remote_all]
     return await context.store.sync_user_voices_from_provider(
         owner_telegram_id=user_id,
         provider_voices=remote_voices,
+        provider_voice_ids_for_prune=all_provider_ids,
     )

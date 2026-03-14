@@ -126,6 +126,7 @@ class VoiceStore:
         *,
         owner_telegram_id: int,
         provider_voices: list[dict[str, str]],
+        provider_voice_ids_for_prune: list[str] | None = None,
     ) -> int:
         async with self._lock:
             data = self._read_data()
@@ -155,6 +156,27 @@ class VoiceStore:
                     }
                 )
                 created_or_updated += 1
+
+            if provider_voice_ids_for_prune is not None:
+                provider_ids = {item.strip() for item in provider_voice_ids_for_prune if item.strip()}
+                removed_entry_ids: set[str] = set()
+                retained_voices: list[dict[str, Any]] = []
+                for raw in data["voices"]:
+                    should_remove = (
+                        raw.get("owner_telegram_id") == owner_telegram_id
+                        and not bool(raw.get("is_public", False))
+                        and str(raw.get("voice_id", "")).strip() not in provider_ids
+                    )
+                    if should_remove:
+                        removed_entry_ids.add(str(raw.get("entry_id", "")))
+                        created_or_updated += 1
+                        continue
+                    retained_voices.append(raw)
+                data["voices"] = retained_voices
+                if removed_entry_ids:
+                    selected_id = data["selected_voice_by_user"].get(str(owner_telegram_id))
+                    if selected_id in removed_entry_ids:
+                        data["selected_voice_by_user"].pop(str(owner_telegram_id), None)
 
             self._write_data(data)
             return created_or_updated
